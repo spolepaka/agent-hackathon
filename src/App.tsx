@@ -1,5 +1,5 @@
 import { FormEvent, Fragment, ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { motion } from 'motion/react'
+import { motion, useReducedMotion } from 'motion/react'
 import {
   ArrowDown,
   ArrowRight,
@@ -145,6 +145,8 @@ function ChatPanel({ open, onClose, initialPrompt }: { open: boolean; onClose: (
     },
   ])
   const bottomRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
+  const triggerRef = useRef<HTMLElement>(null)
   const clientId = useRef(crypto.randomUUID())
   const submittedInitial = useRef<string | undefined>(undefined)
 
@@ -158,6 +160,26 @@ function ChatPanel({ open, onClose, initialPrompt }: { open: boolean; onClose: (
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
+
+  // --- Fix #8: Focus management for chat panel ---
+  useEffect(() => {
+    if (open) {
+      triggerRef.current = document.activeElement as HTMLElement
+      const focusable = panelRef.current?.querySelector<HTMLElement>('textarea, button')
+      focusable?.focus()
+    } else {
+      triggerRef.current?.focus()
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open, onClose])
 
   const sendMessage = useCallback(async (content: string) => {
     const clean = content.trim()
@@ -205,7 +227,7 @@ function ChatPanel({ open, onClose, initialPrompt }: { open: boolean; onClose: (
   return (
     <>
       <button className={`chat-scrim ${open ? 'visible' : ''}`} aria-label="Close chat" onClick={onClose} tabIndex={open ? 0 : -1} />
-      <aside className={`chat-panel ${open ? 'open' : ''}`} aria-hidden={!open} aria-label="LearnLoop chat">
+      <aside ref={panelRef} className={`chat-panel ${open ? 'open' : ''}`} aria-hidden={!open} aria-label="LearnLoop chat" inert={!open}>
         <header className="chat-header">
           <div className="agent-identity">
             <span className="agent-avatar"><Bot size={20} /></span>
@@ -328,8 +350,15 @@ function ProductPreview({ onStart }: { onStart: () => void }) {
 }
 
 function FadeIn({ children, className = '' }: { children: ReactNode; className?: string }) {
+  const reduceMotion = useReducedMotion()
   return (
-    <motion.div className={className} initial={{ opacity: 0, y: 24 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, margin: '-80px' }} transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}>
+    <motion.div
+      className={className}
+      initial={reduceMotion ? false : { opacity: 0, y: 24 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, margin: '-80px' }}
+      transition={reduceMotion ? { duration: 0 } : { duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
+    >
       {children}
     </motion.div>
   )
@@ -339,6 +368,7 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false)
   const [initialPrompt, setInitialPrompt] = useState<string>()
   const [mobileNav, setMobileNav] = useState(false)
+  const reduceMotion = useReducedMotion()
 
   const startChat = (prompt?: string) => {
     setInitialPrompt(prompt)
@@ -423,7 +453,14 @@ export default function App() {
           </FadeIn>
           <div className="steps-list">
             {steps.map(([number, title, text], index) => (
-              <motion.div className="step" key={number} initial={{ opacity: 0, x: -20 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }} transition={{ delay: index * 0.07 }}>
+              <motion.div
+                className="step"
+                key={number}
+                initial={reduceMotion ? false : { opacity: 0, x: -20 }}
+                whileInView={{ opacity: 1, x: 0 }}
+                viewport={{ once: true }}
+                transition={reduceMotion ? { duration: 0 } : { delay: index * 0.07 }}
+              >
                 <span>{number}</span><h3>{title}</h3><p>{text}</p><ArrowUpRight size={20} />
               </motion.div>
             ))}
@@ -445,7 +482,7 @@ export default function App() {
             {features.map((feature, index) => {
               const Icon = feature.icon
               return (
-                <motion.article className={`feature-card ${feature.tone}`} key={feature.label} initial={{ opacity: 0, y: 25 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ delay: (index % 3) * 0.08 }}>
+                <motion.article className={`feature-card ${feature.tone}`} key={feature.label} initial={reduceMotion ? false : { opacity: 0, y: 25 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={reduceMotion ? { duration: 0 } : { delay: (index % 3) * 0.08 }}>
                   <div className="feature-top"><span><Icon size={20} /></span><small>{String(index + 1).padStart(2, '0')}</small></div>
                   <p>{feature.label}</p><h3>{feature.title}</h3><div>{feature.text}</div>
                 </motion.article>

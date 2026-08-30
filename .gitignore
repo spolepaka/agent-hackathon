@@ -1,1 +1,6 @@
 .specstory/
+node_modules/
+dist/
+.env
+*.tsbuildinfo
+.commit-msg.txt

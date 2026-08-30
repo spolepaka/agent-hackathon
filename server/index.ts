@@ -44,10 +44,16 @@ function touchSession(id: string, state: SessionState) {
 }
 
 // --- Fix #6: Per-client serialization ---
+// --- Fix #3 (rereview): Clean up queue entries after settling ---
 function withClientLock<T>(clientId: string, fn: () => Promise<T>): Promise<T> {
   const previous = clientQueues.get(clientId) ?? Promise.resolve()
   const next = previous.then(fn, fn)
-  clientQueues.set(clientId, next.catch(() => undefined))
+  const settled = next.catch(() => undefined)
+  clientQueues.set(clientId, settled)
+  // Delete the queue entry once settled, but only if no newer request replaced it
+  settled.finally(() => {
+    if (clientQueues.get(clientId) === settled) clientQueues.delete(clientId)
+  })
   return next
 }
 
@@ -124,6 +130,13 @@ app.post('/api/chat', async (request, response) => {
     response.json(result)
   } catch (error) {
     // --- Fix #3: Fall back to local demo on TrueForge errors ---
+    // --- Fix #2 (rereview): Clear stale pendingResponses so the next
+    //     message isn't misrouted as a tool answer to a failed turn ---
+    const sessionState = sessions.get(clientId)
+    if (sessionState) {
+      sessionState.pendingResponses = []
+      touchSession(clientId, sessionState)
+    }
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     console.error(`Chat error for ${clientId}: ${errorMessage}`)
     response.json({ ...localAgentReply(clientId, message), mode: 'local-demo' })

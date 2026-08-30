@@ -391,7 +391,7 @@ function PracticeLab({ metadata, mode, code, brief, result, loading, onCode, onR
             <div className="code-toolbar"><span><i /><i /><i /> Python · isolated</span><span>main.py</span></div>
             <label htmlFor="practice-code">Python attempt</label>
             <textarea id="practice-code" value={code} onChange={(event) => onCode(event.target.value)} spellCheck={false} aria-describedby="sandbox-note" />
-            <div className="code-actions"><p id="sandbox-note"><ShieldCheck size={14} aria-hidden="true" /> Code is sent only to the configured TrueForge sandbox.</p><button type="button" onClick={onRun} disabled={mode !== 'trueforge' || loading || !code.trim()}>{loading ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : <Play size={16} fill="currentColor" aria-hidden="true" />} Run &amp; check</button></div>
+            <div className="code-actions"><p id="sandbox-note"><ShieldCheck size={14} aria-hidden="true" /> Code is sent to the TrueForge learning agent, which may execute it in an isolated sandbox. Do not paste secrets.</p><button type="button" onClick={onRun} disabled={mode !== 'trueforge' || loading || !code.trim()}>{loading ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : <Play size={16} fill="currentColor" aria-hidden="true" />} Run &amp; check</button></div>
           </div>
           <div className="lab-brief">
             <span>Current mission</span>
@@ -476,6 +476,9 @@ export default function Studio({ initialPrompt, initialView = 'loop', onExit }: 
   const clientId = useRef(createClientId())
   const inFlight = useRef(false)
   const initialHandled = useRef(false)
+  // --- Fix #4 (Qodo PR#6): Generation token so stale in-flight responses
+  //     can't contaminate state after resetLoop rotates the client ID ---
+  const generation = useRef(0)
   const started = messages.length > 0 || loading
 
   useEffect(() => {
@@ -510,6 +513,7 @@ export default function Studio({ initialPrompt, initialView = 'loop', onExit }: 
     const clean = content.trim()
     if (!clean || inFlight.current) return
     inFlight.current = true
+    const myGeneration = generation.current
     setLoading(true)
     setError('')
     setLastSubmission(clean)
@@ -526,6 +530,8 @@ export default function Studio({ initialPrompt, initialView = 'loop', onExit }: 
       })
       const data = (await response.json()) as ChatResponse
       if (!response.ok) throw new Error(data.error ?? 'The learning agent could not respond.')
+      // --- Fix #4 (Qodo PR#6): Discard the response if resetLoop ran while we were waiting ---
+      if (myGeneration !== generation.current) return
       const reply = data.reply?.trim() || 'I need one more detail before I can continue.'
       setMode(data.mode ?? 'local-demo')
       setMetadata((current) => data.studio ? {
@@ -538,21 +544,31 @@ export default function Studio({ initialPrompt, initialView = 'loop', onExit }: 
       if (context === 'practice') setPracticeResult(reply)
       if (context === 'sources') setSourceResult(reply)
     } catch (caught) {
+      if (myGeneration !== generation.current) return
       setError(caught instanceof Error ? caught.message : 'Something went wrong.')
     } finally {
-      inFlight.current = false
-      setLoading(false)
+      if (myGeneration === generation.current) {
+        inFlight.current = false
+        setLoading(false)
+      }
     }
   }, [])
 
+  // --- Fix #2 & #3 (Qodo PR#6): Send the deep-link prompt with the correct
+  //     message context and don't skip it when a prior session is restored ---
   useEffect(() => {
-    if (!initialPrompt || started || initialHandled.current) return
+    if (!initialPrompt || initialHandled.current) return
     initialHandled.current = true
-    void sendMessage(initialPrompt)
-  }, [initialPrompt, sendMessage, started])
+    const context: MessageContext = initialView === 'sources' ? 'sources' : 'loop'
+    void sendMessage(initialPrompt, context)
+  }, [initialPrompt, sendMessage, initialView])
 
   const resetLoop = () => {
     if (messages.length && !window.confirm('Start a new loop? The current temporary session will be cleared.')) return
+    // --- Fix #4 (Qodo PR#6): Invalidate any in-flight response so it can't
+    //     contaminate the new loop after the client ID is rotated ---
+    generation.current += 1
+    inFlight.current = false
     sessionStorage.removeItem(SESSION_KEY)
     const nextClient = crypto.randomUUID()
     sessionStorage.setItem(CLIENT_KEY, nextClient)

@@ -92,12 +92,28 @@ function topicFromMessage(message: string) {
   return firstSentence ? firstSentence.slice(0, 52) : 'New learning goal'
 }
 
+// --- Fix #1 (Qodo PR#6): Reject negated failure statements as positive evidence ---
+function stripNegatedMatches(text: string, positivePattern: RegExp, negationPattern: RegExp): boolean {
+  const positives = text.match(positivePattern) ?? []
+  const negations = text.match(negationPattern) ?? []
+  // A positive match only counts if it is not immediately preceded by a negation
+  return positives.some((positive) => {
+    const positiveIndex = text.indexOf(positive)
+    return !negations.some((negation) => {
+      const negationIndex = text.indexOf(negation)
+      return Math.abs(positiveIndex - negationIndex) < 40
+    })
+  })
+}
+
 function studioFromReply(reply: string, message: string, previous?: StudioMetadata): StudioMetadata {
   const normalized = reply.toLowerCase()
   const hasSandboxResult = /practice lab result|sandbox result|actual output|ran successfully/.test(normalized)
   const needsRevision = /does not match|did not match|didn't match|mismatch|challenge target|partial result|try again|needs? (an|one)? ?adjustment/.test(normalized)
-  const passedSandbox = hasSandboxResult && !needsRevision && /matched (the )?expected|matched expected exactly|all tests passed|expected behavior confirmed/.test(normalized)
-  const proofPassed = Boolean(previous?.proofPassed || /proof check complete|mastery status[^\n]*(passed|mastered)|enough evidence to move|pattern demonstrated/.test(normalized))
+  const negationPattern = /\bnot\b|\bnever\b|\binsufficient\b|\bcannot\b|\bcan't\b|\bcouldn't\b|\bfailed\b|\bfails?\b|\bno evidence\b|\bnot yet\b/i
+  const passedSandbox = hasSandboxResult && !needsRevision && stripNegatedMatches(normalized, /matched (the )?expected|matched expected exactly|all tests passed|expected behavior confirmed/, negationPattern)
+  const proofKeywords = /proof check complete|mastery status[^\n]*(passed|mastered)|enough evidence to move|pattern demonstrated/
+  const proofPassed = Boolean(previous?.proofPassed) || (proofKeywords.test(normalized) && !negationPattern.test(normalized))
   let sandboxOutcome: SandboxOutcome = previous?.sandboxOutcome ?? 'none'
   if (hasSandboxResult) sandboxOutcome = needsRevision ? 'partial' : passedSandbox ? 'passed' : 'inconclusive'
 
@@ -213,7 +229,9 @@ app.post('/api/chat', async (request, response) => {
 
 async function handleChat(clientId: string, message: string) {
   let sessionState = sessions.get(clientId)
-  if (sessionState?.localOnly || !(await trueForgeAvailable())) {
+  // --- Fix #5 (Qodo PR#6): Always recheck TrueForge availability (cached 15s)
+  //     so a transient outage doesn't permanently trap the client in local-demo ---
+  if (!(await trueForgeAvailable())) {
     const fallback = localAgentReply(clientId, message)
     const studio = studioFromReply(fallback.reply, message, sessionState?.studio)
     sessionState = sessionState ?? {
@@ -232,11 +250,14 @@ async function handleChat(clientId: string, message: string) {
   const isNewSession = !sessionState?.sessionId
   if (!sessionState?.sessionId) {
     const { data: session } = await client.sessions.create({ agent: { name: agentName } })
+    // --- Fix #5 (Qodo PR#6): Preserve studio metadata from local-demo
+    //     so recovery doesn't erase progress gathered during the outage ---
+    const previousStudio = sessionState?.studio
     sessionState = {
       sessionId: session.id,
       pendingResponses: [],
       lastUsed: Date.now(),
-      studio: {
+      studio: previousStudio ?? {
         phase: 'orient',
         topic: topicFromMessage(message),
         evidence: [],
@@ -246,6 +267,9 @@ async function handleChat(clientId: string, message: string) {
       },
       localOnly: false,
     }
+  } else if (sessionState.localOnly) {
+    // TrueForge recovered — clear the local-only flag so future turns use the agent
+    sessionState.localOnly = false
   }
   touchSession(clientId, sessionState)
 

@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, ReactNode, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
 import {
   ArrowDown,
@@ -9,14 +9,12 @@ import {
   BrainCircuit,
   Check,
   ChevronRight,
-  CircleDot,
   Code2,
   Compass,
   LockKeyhole,
   Menu,
   MessageCircle,
   Play,
-  Send,
   ShieldCheck,
   Sparkles,
   Target,
@@ -24,21 +22,8 @@ import {
   Zap,
 } from 'lucide-react'
 
-type Artifact = {
-  type: 'growth-edge' | 'loop' | 'proof'
-  title: string
-  eyebrow: string
-  items: string[]
-}
-
-type Message = {
-  id: number
-  role: 'assistant' | 'user'
-  content: string
-  artifact?: Artifact
-}
-
-type ConnectionMode = 'checking' | 'trueforge' | 'local-demo'
+const Studio = lazy(() => import('./Studio'))
+type StudioStartView = 'loop' | 'map' | 'practice' | 'sources' | 'memory'
 
 const prompts = [
   'I’m stuck on Python loops',
@@ -101,28 +86,6 @@ const steps = [
   ['06', 'Know what comes next', 'The Mastery Map updates from evidence and points to one Next Best Step.'],
 ]
 
-function RichText({ children }: { children: string }) {
-  const blocks = children.split('\n')
-  return (
-    <>
-      {blocks.map((block, blockIndex) => (
-        <Fragment key={`${block}-${blockIndex}`}>
-          {block ? (
-            <span>
-              {block.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, index) => {
-                if (part.startsWith('`') && part.endsWith('`')) return <code key={index}>{part.slice(1, -1)}</code>
-                if (part.startsWith('**') && part.endsWith('**')) return <strong key={index}>{part.slice(2, -2)}</strong>
-                return <Fragment key={index}>{part}</Fragment>
-              })}
-            </span>
-          ) : null}
-          {blockIndex < blocks.length - 1 && <br />}
-        </Fragment>
-      ))}
-    </>
-  )
-}
-
 function Logo() {
   return (
     <a className="logo" href="#top" aria-label="LearnLoop home">
@@ -132,183 +95,19 @@ function Logo() {
   )
 }
 
-function ChatPanel({ open, onClose, initialPrompt }: { open: boolean; onClose: () => void; initialPrompt?: string }) {
-  const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [mode, setMode] = useState<ConnectionMode>('checking')
-  const [suggestions, setSuggestions] = useState(prompts.slice(0, 3))
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 1,
-      role: 'assistant',
-      content: 'What are you trying to learn—or where did you get stuck?\n\nPaste code, describe a confusing idea, or share a video or resource.',
-    },
-  ])
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const panelRef = useRef<HTMLElement>(null)
-  const triggerRef = useRef<HTMLElement>(null)
-  const clientId = useRef(crypto.randomUUID())
-  const submittedInitial = useRef<string | undefined>(undefined)
-
-  useEffect(() => {
-    fetch('/api/health')
-      .then((result) => result.json())
-      .then((data: { mode: ConnectionMode }) => setMode(data.mode))
-      .catch(() => setMode('local-demo'))
-  }, [])
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, loading])
-
-  // --- Fix #8: Focus management for chat panel ---
-  useEffect(() => {
-    if (open) {
-      triggerRef.current = document.activeElement as HTMLElement
-      const focusable = panelRef.current?.querySelector<HTMLElement>('textarea, button')
-      focusable?.focus()
-    } else {
-      triggerRef.current?.focus()
-    }
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open, onClose])
-
-  const sendMessage = useCallback(async (content: string) => {
-    const clean = content.trim()
-    if (!clean || loading) return
-    setInput('')
-    setMessages((current) => [...current, { id: Date.now(), role: 'user', content: clean }])
-    setSuggestions([])
-    setLoading(true)
-    try {
-      const result = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId: clientId.current, message: clean }),
-      })
-      const data = (await result.json()) as { reply?: string; error?: string; suggestions?: string[]; artifact?: Artifact; mode?: ConnectionMode }
-      if (!result.ok) throw new Error(data.error ?? 'The agent could not respond.')
-      setMode((current) => data.mode ?? current)
-      setMessages((current) => [
-        ...current,
-        { id: Date.now() + 1, role: 'assistant', content: data.reply ?? 'No response received.', artifact: data.artifact },
-      ])
-      setSuggestions(data.suggestions ?? [])
-    } catch (error) {
-      setMessages((current) => [
-        ...current,
-        { id: Date.now() + 1, role: 'assistant', content: error instanceof Error ? error.message : 'Something went wrong.' },
-      ])
-    } finally {
-      setLoading(false)
-    }
-  }, [loading])
-
-  useEffect(() => {
-    if (open && initialPrompt && submittedInitial.current !== initialPrompt) {
-      submittedInitial.current = initialPrompt
-      void sendMessage(initialPrompt)
-    }
-  }, [open, initialPrompt, sendMessage])
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
-    void sendMessage(input)
-  }
-
+function ProductPreview({ onOpen }: { onOpen: (view: StudioStartView) => void }) {
   return (
-    <>
-      <button className={`chat-scrim ${open ? 'visible' : ''}`} aria-label="Close chat" onClick={onClose} tabIndex={open ? 0 : -1} />
-      <aside ref={panelRef} className={`chat-panel ${open ? 'open' : ''}`} aria-hidden={!open} aria-label="LearnLoop chat" inert={!open}>
-        <header className="chat-header">
-          <div className="agent-identity">
-            <span className="agent-avatar"><Bot size={20} /></span>
-            <div><strong>LearnLoop</strong><span><i className={mode === 'trueforge' ? 'live' : ''} />{mode === 'checking' ? 'Connecting…' : mode === 'trueforge' ? 'TrueForge connected' : 'Local demo mode'}</span></div>
-          </div>
-          <button className="icon-button" onClick={onClose} aria-label="Close chat"><X size={20} /></button>
-        </header>
-
-        <div className="chat-context">
-          <span><CircleDot size={13} /> Learning signal</span>
-          <span><ShieldCheck size={13} /> Memory requires consent</span>
-        </div>
-
-        <div className="messages" aria-live="polite">
-          <div className="chat-date">Today’s Loop</div>
-          {messages.map((message) => (
-            <div className={`message-row ${message.role}`} key={message.id}>
-              {message.role === 'assistant' && <span className="mini-avatar"><span /></span>}
-              <div className={`message ${message.role}`}>
-                <RichText>{message.content}</RichText>
-                {message.artifact && (
-                  <div className={`chat-artifact ${message.artifact.type}`}>
-                    <span>{message.artifact.eyebrow}</span>
-                    <strong>{message.artifact.title}</strong>
-                    <ul>{message.artifact.items.map((item) => <li key={item}><Check size={13} />{item}</li>)}</ul>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          {loading && (
-            <div className="message-row assistant">
-              <span className="mini-avatar"><span /></span>
-              <div className="message assistant typing"><i /><i /><i /></div>
-            </div>
-          )}
-          <div ref={bottomRef} />
-        </div>
-
-        <div className="chat-bottom">
-          {suggestions.length > 0 && (
-            <div className="chat-suggestions">
-              {suggestions.map((suggestion) => <button key={suggestion} onClick={() => void sendMessage(suggestion)}>{suggestion}</button>)}
-            </div>
-          )}
-          <form className="chat-composer" onSubmit={submit}>
-            <textarea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  if (input.trim()) void sendMessage(input)
-                }
-              }}
-              placeholder="Describe where you got stuck…"
-              rows={1}
-              aria-label="Message LearnLoop"
-            />
-            <button type="submit" disabled={!input.trim() || loading} aria-label="Send message"><Send size={18} /></button>
-          </form>
-          <p>Learning Memory is never saved without your approval.</p>
-        </div>
-      </aside>
-    </>
-  )
-}
-
-function ProductPreview({ onStart }: { onStart: () => void }) {
-  return (
-    <div className="product-preview">
+    <div className="product-preview" role="group" aria-label="LearnLoop Studio preview">
       <div className="preview-topbar">
         <Logo />
         <div className="preview-user">MY</div>
       </div>
       <div className="preview-layout">
-        <aside className="preview-sidebar">
-          <span className="active"><MessageCircle size={16} /> Today’s Loop</span>
-          <span><BrainCircuit size={16} /> Mastery Map</span>
-          <span><Code2 size={16} /> Practice Lab</span>
-          <span><BookOpen size={16} /> Sources</span>
+        <aside className="preview-sidebar" aria-label="Studio preview navigation">
+          <button type="button" className="active" onClick={() => onOpen('loop')}><MessageCircle size={16} aria-hidden="true" /> Today’s Loop</button>
+          <button type="button" onClick={() => onOpen('map')}><BrainCircuit size={16} aria-hidden="true" /> Mastery Map</button>
+          <button type="button" onClick={() => onOpen('practice')}><Code2 size={16} aria-hidden="true" /> Practice Lab</button>
+          <button type="button" onClick={() => onOpen('sources')}><BookOpen size={16} aria-hidden="true" /> Sources</button>
         </aside>
         <div className="preview-content">
           <div className="snapshot-row">
@@ -317,7 +116,7 @@ function ProductPreview({ onStart }: { onStart: () => void }) {
           </div>
           <div className="preview-grid">
             <div className="map-card">
-              <div className="card-heading"><div><span>MASTERY MAP</span><h3>Your next concept</h3></div><button aria-label="Open mastery map"><ArrowUpRight size={17} /></button></div>
+              <div className="card-heading"><div><span>MASTERY MAP</span><h3>Your next concept</h3></div><button type="button" onClick={() => onOpen('map')} aria-label="Open Mastery Map in the studio"><ArrowUpRight size={17} aria-hidden="true" /></button></div>
               <div className="map-visual">
                 <svg viewBox="0 0 430 180" role="img" aria-label="Concept mastery map">
                   <path d="M67 87 C120 87 123 42 185 42" />
@@ -340,7 +139,7 @@ function ProductPreview({ onStart }: { onStart: () => void }) {
                   <div className={index === 0 ? 'current' : ''} key={item}><span>{index + 1}</span><p>{item}<small>{['2 min', '30 sec', '3 min', '2 min'][index]}</small></p>{index === 0 && <Play size={12} fill="currentColor" />}</div>
                 ))}
               </div>
-              <button onClick={onStart}>Begin loop <ArrowRight size={15} /></button>
+              <button type="button" onClick={() => onOpen('loop')}>Begin loop <ArrowRight size={15} aria-hidden="true" /></button>
             </div>
           </div>
         </div>
@@ -364,32 +163,57 @@ function FadeIn({ children, className = '' }: { children: ReactNode; className?:
   )
 }
 
-export default function App() {
-  const [chatOpen, setChatOpen] = useState(false)
-  const [initialPrompt, setInitialPrompt] = useState<string>()
+function LandingPage({ onStart }: { onStart: (prompt?: string, view?: StudioStartView) => void }) {
   const [mobileNav, setMobileNav] = useState(false)
   const reduceMotion = useReducedMotion()
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
 
-  const startChat = (prompt?: string) => {
-    setInitialPrompt(prompt)
-    setChatOpen(true)
+  const closeMobileNav = useCallback(() => {
+    const restoreFocus = mobileNav
     setMobileNav(false)
-  }
+    if (restoreFocus) window.requestAnimationFrame(() => menuButtonRef.current?.focus())
+  }, [mobileNav])
+
+  useEffect(() => {
+    if (!mobileNav) return
+    const focusable = [...(menuRef.current?.querySelectorAll<HTMLElement>('a, button') ?? [])]
+    focusable[0]?.focus()
+    const handleMenuKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeMobileNav()
+        return
+      }
+      if (event.key !== 'Tab' || focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleMenuKeys)
+    return () => document.removeEventListener('keydown', handleMenuKeys)
+  }, [closeMobileNav, mobileNav])
 
   return (
     <div id="top">
-      <nav className="site-nav">
+      <a className="landing-skip-link" href="#main-content">Skip to main content</a>
+      <nav className="site-nav" aria-label="Main navigation">
         <Logo />
-        <div className={`nav-links ${mobileNav ? 'show' : ''}`}>
-          <a href="#how" onClick={() => setMobileNav(false)}>How it works</a>
-          <a href="#studio" onClick={() => setMobileNav(false)}>The studio</a>
-          <a href="#principles" onClick={() => setMobileNav(false)}>Why LearnLoop</a>
-          <button className="nav-cta" onClick={() => startChat()}>Start learning <ArrowUpRight size={15} /></button>
+        <div ref={menuRef} className={`nav-links ${mobileNav ? 'show' : ''}`} id="landing-navigation">
+          <a href="#how" onClick={closeMobileNav}>How it works</a>
+          <a href="#studio" onClick={closeMobileNav}>The studio</a>
+          <a href="#principles" onClick={closeMobileNav}>Why LearnLoop</a>
+          <button type="button" className="nav-cta" onClick={() => onStart()}>Open studio <ArrowUpRight size={15} aria-hidden="true" /></button>
         </div>
-        <button className="menu-button" onClick={() => setMobileNav(!mobileNav)} aria-label="Toggle navigation">{mobileNav ? <X /> : <Menu />}</button>
+        <button ref={menuButtonRef} type="button" className="menu-button" onClick={() => setMobileNav(!mobileNav)} aria-label="Toggle navigation" aria-controls="landing-navigation" aria-expanded={mobileNav}>{mobileNav ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}</button>
       </nav>
 
-      <main>
+      <main id="main-content">
         <section className="hero">
           <div className="hero-orbit orbit-one" /><div className="hero-orbit orbit-two" />
           <FadeIn className="hero-copy">
@@ -397,8 +221,8 @@ export default function App() {
             <h1>From content<br />to <em>capability.</em></h1>
             <p>Stop watching lessons you cannot use. LearnLoop finds the one thing you’re missing, teaches it the right way, and helps you prove what you can do next.</p>
             <div className="hero-actions">
-              <button className="primary-button" onClick={() => startChat()}>Start today’s loop <ArrowRight size={18} /></button>
-              <a className="text-button" href="#how">See how it works <ArrowDown size={17} /></a>
+              <button type="button" className="primary-button" onClick={() => onStart()}>Start today’s loop <ArrowRight size={18} aria-hidden="true" /></button>
+              <a className="text-button" href="#how">See how it works <ArrowDown size={17} aria-hidden="true" /></a>
             </div>
             <div className="hero-note"><span className="people"><i>M</i><i>J</i><i>A</i></span><span><strong>Built for the moment</strong><br />after passive learning fails.</span></div>
           </FadeIn>
@@ -409,9 +233,9 @@ export default function App() {
                 <div className="demo-agent"><span className="agent-avatar"><Bot size={19} /></span><div><strong>LearnLoop</strong><small><i /> ready to learn</small></div></div>
                 <div className="demo-question"><span>What are you trying to learn—or where did you get stuck?</span><p>Paste code, describe a confusing idea, or share a video.</p></div>
                 <div className="prompt-grid">
-                  {prompts.map((prompt, index) => <button key={prompt} onClick={() => startChat(prompt)}><span>{[<Code2 />, <BrainCircuit />, <Play />, <Target />][index]}</span>{prompt}<ChevronRight size={16} /></button>)}
+                  {prompts.map((prompt, index) => <button type="button" key={prompt} onClick={() => onStart(prompt)}><span aria-hidden="true">{[<Code2 key="code" />, <BrainCircuit key="concept" />, <Play key="video" />, <Target key="next" />][index]}</span>{prompt}<ChevronRight size={16} aria-hidden="true" /></button>)}
                 </div>
-                <button className="demo-input" onClick={() => startChat()}><span>Describe where you got stuck…</span><i><ArrowRight size={16} /></i></button>
+                <button type="button" className="demo-input" onClick={() => onStart()}><span>Describe where you got stuck…</span><i><ArrowRight size={16} aria-hidden="true" /></i></button>
               </div>
             </div>
             <div className="floating-proof"><span><Check size={14} /></span><div><strong>Evidence, not empty praise</strong><small>Progress updates after you prove it.</small></div></div>
@@ -420,7 +244,7 @@ export default function App() {
 
         <section className="statement" id="principles">
           <FadeIn>
-            <p>NOT ANOTHER AI TUTOR THAT TALKS AT YOU</p>
+            <p>Not another AI tutor that talks at you</p>
             <h2>A learning agent that <em>adapts</em><br />when you get stuck.</h2>
             <div className="statement-rule"><span>Confusion</span><i /><span>Clarity</span><i /><span>Practice</span><i /><span>Proof</span></div>
           </FadeIn>
@@ -440,7 +264,7 @@ export default function App() {
             <FadeIn className="problem-answer">
               <span className="squiggle">⌁</span>
               <p>LearnLoop turns <strong>“I’m confused”</strong> into a small, concrete path: understand the gap, see the idea, try it yourself, prove it, and move forward.</p>
-              <button onClick={() => startChat()}>Find my next step <ArrowRight size={17} /></button>
+              <button type="button" onClick={() => onStart()}>Find my next step <ArrowRight size={17} aria-hidden="true" /></button>
             </FadeIn>
           </div>
         </section>
@@ -473,7 +297,7 @@ export default function App() {
             <h2>Your learning, made <em>visible.</em></h2>
             <p>A calm workspace that turns every answer, attempt, and insight into a path you can understand.</p>
           </FadeIn>
-          <FadeIn><ProductPreview onStart={() => startChat('I’m stuck on Python loops')} /></FadeIn>
+          <FadeIn><ProductPreview onOpen={(view) => onStart(view === 'sources' ? 'I want to learn from a video about Python loops' : 'I’m stuck on Python loops', view)} /></FadeIn>
         </section>
 
         <section className="features-section">
@@ -511,7 +335,7 @@ export default function App() {
             <span className="eyebrow"><span><Sparkles size={13} /></span> Your next step is smaller than you think</span>
             <h2>Ready to turn<br /><em>confusion into capability?</em></h2>
             <p>Bring the code that failed, the concept that won’t click, or the video that left you stuck.</p>
-            <button className="primary-button light-button" onClick={() => startChat()}>Start today’s loop <ArrowRight size={18} /></button>
+            <button type="button" className="primary-button light-button" onClick={() => onStart()}>Start today’s loop <ArrowRight size={18} aria-hidden="true" /></button>
           </FadeIn>
         </section>
       </main>
@@ -519,12 +343,46 @@ export default function App() {
       <footer>
         <Logo />
         <p>From content to capability.</p>
-        <div><a href="#how">How it works</a><a href="#studio">The studio</a><button onClick={() => startChat()}>Start learning</button></div>
+        <div><a href="#how">How it works</a><a href="#studio">The studio</a><button type="button" onClick={() => onStart()}>Open studio</button></div>
         <small>Built with TrueForge · Learning Memory always requires consent.</small>
       </footer>
-
-      <button className="floating-chat" onClick={() => startChat()} aria-label="Open LearnLoop chat"><MessageCircle size={21} /><span>Ask LearnLoop</span></button>
-      <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} initialPrompt={initialPrompt} />
     </div>
   )
+}
+
+export default function App() {
+  const [pathname, setPathname] = useState(window.location.pathname)
+
+  useEffect(() => {
+    const updatePath = () => setPathname(window.location.pathname)
+    window.addEventListener('popstate', updatePath)
+    return () => window.removeEventListener('popstate', updatePath)
+  }, [])
+
+  const navigate = useCallback((path: string) => {
+    window.history.pushState({}, '', path)
+    setPathname(window.location.pathname)
+    window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [])
+
+  const openStudio = useCallback((prompt?: string, view: StudioStartView = 'loop') => {
+    const params = new URLSearchParams()
+    if (prompt) params.set('prompt', prompt)
+    if (view !== 'loop') params.set('view', view)
+    navigate(params.size ? `/studio?${params}` : '/studio')
+  }, [navigate])
+
+  if (pathname.startsWith('/studio')) {
+    const params = new URLSearchParams(window.location.search)
+    const prompt = params.get('prompt') ?? undefined
+    const requestedView = params.get('view')
+    const initialView: StudioStartView = ['loop', 'map', 'practice', 'sources', 'memory'].includes(requestedView ?? '') ? requestedView as StudioStartView : 'loop'
+    return (
+      <Suspense fallback={<div className="studio-route-loading" role="status"><span className="logo-mark"><span /></span><strong>Opening your studio…</strong></div>}>
+        <Studio initialPrompt={prompt} initialView={initialView} onExit={() => navigate('/')} />
+      </Suspense>
+    )
+  }
+
+  return <LandingPage onStart={openStudio} />
 }

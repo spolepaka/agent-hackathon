@@ -11,16 +11,32 @@ type PendingResponse = {
   toolCallId: string
 }
 
+type StudioPhase = 'orient' | 'learn' | 'predict' | 'practice' | 'prove' | 'complete'
+
+type SandboxOutcome = 'none' | 'inconclusive' | 'partial' | 'passed'
+
+type StudioMetadata = {
+  phase: StudioPhase
+  topic: string
+  evidence: string[]
+  sandboxed: boolean
+  sandboxOutcome: SandboxOutcome
+  proofPassed: boolean
+}
+
 type SessionState = {
-  sessionId: string
+  sessionId: string | null
   pendingResponses: PendingResponse[]
   lastUsed: number
+  studio: StudioMetadata
+  localOnly: boolean
 }
 
 const app = express()
 const port = Number(process.env.PORT ?? 8787)
 const baseUrl = process.env.TRUEFORGE_BASE_URL ?? 'http://localhost:8790'
 const agentName = process.env.TRUEFORGE_AGENT_NAME ?? 'learnloop'
+const studioResponseInstruction = 'This client renders GitHub-flavored Markdown inside a custom learning studio. Return learner-facing Markdown only. Do not emit openui or sandbox_artifacts fenced blocks.'
 const sessions = new Map<string, SessionState>()
 const clientQueues = new Map<string, Promise<unknown>>()
 
@@ -68,6 +84,65 @@ function contentToText(content: unknown) {
     .join('')
 }
 
+function topicFromMessage(message: string) {
+  const clean = message.replace(/```[\s\S]*?```/g, '').replace(/\s+/g, ' ').trim()
+  if (/\b(range|python|for loop|while loop)\b/i.test(clean)) return 'Python loops'
+  if (/\b(video|youtube|article|resource|transcript)\b/i.test(clean)) return 'Source learning'
+  const firstSentence = clean.split(/[.!?\n]/)[0]?.trim()
+  return firstSentence ? firstSentence.slice(0, 52) : 'New learning goal'
+}
+
+// --- Fix #1 (Qodo PR#6): Reject negated failure statements as positive evidence ---
+function stripNegatedMatches(text: string, positivePattern: RegExp, negationPattern: RegExp): boolean {
+  const positives = text.match(positivePattern) ?? []
+  const negations = text.match(negationPattern) ?? []
+  // A positive match only counts if it is not immediately preceded by a negation
+  return positives.some((positive) => {
+    const positiveIndex = text.indexOf(positive)
+    return !negations.some((negation) => {
+      const negationIndex = text.indexOf(negation)
+      return Math.abs(positiveIndex - negationIndex) < 40
+    })
+  })
+}
+
+function studioFromReply(reply: string, message: string, previous?: StudioMetadata): StudioMetadata {
+  const normalized = reply.toLowerCase()
+  const hasSandboxResult = /practice lab result|sandbox result|actual output|ran successfully/.test(normalized)
+  const needsRevision = /does not match|did not match|didn't match|mismatch|challenge target|partial result|try again|needs? (an|one)? ?adjustment/.test(normalized)
+  const negationPattern = /\bnot\b|\bnever\b|\binsufficient\b|\bcannot\b|\bcan't\b|\bcouldn't\b|\bfailed\b|\bfails?\b|\bno evidence\b|\bnot yet\b/i
+  const passedSandbox = hasSandboxResult && !needsRevision && stripNegatedMatches(normalized, /matched (the )?expected|matched expected exactly|all tests passed|expected behavior confirmed/, negationPattern)
+  const proofKeywords = /proof check complete|mastery status[^\n]*(passed|mastered)|enough evidence to move|pattern demonstrated/
+  const proofPassed = Boolean(previous?.proofPassed) || (proofKeywords.test(normalized) && !negationPattern.test(normalized))
+  let sandboxOutcome: SandboxOutcome = previous?.sandboxOutcome ?? 'none'
+  if (hasSandboxResult) sandboxOutcome = needsRevision ? 'partial' : passedSandbox ? 'passed' : 'inconclusive'
+
+  let phase: StudioPhase = previous?.phase ?? 'orient'
+  if (proofPassed) phase = 'complete'
+  else if (/proof check/.test(normalized)) phase = 'prove'
+  else if (hasSandboxResult) phase = needsRevision ? 'practice' : 'prove'
+  else if (/tiny practice|code challenge|paste your (completed )?code|practice lab/.test(normalized)) phase = 'practice'
+  else if (/prediction|predict|without running/.test(normalized)) phase = 'predict'
+  else if (/growth edge|learner snapshot|one thing to learn next|today['’]s (mini )?loop/.test(normalized)) phase = 'learn'
+
+  const evidence = new Set(previous?.evidence ?? [])
+  if (!previous || previous.evidence.length === 0) evidence.add('Learning goal shared')
+  if (/growth edge|learner snapshot/.test(normalized)) evidence.add('Growth Edge identified')
+  if (hasSandboxResult) evidence.add('Sandbox result received')
+  if (passedSandbox) evidence.add('Practice target passed')
+  if (/proof check/.test(normalized)) evidence.add('Proof Check reached')
+  if (proofPassed) evidence.add('Transfer evidence accepted')
+
+  return {
+    phase,
+    topic: previous?.topic ?? topicFromMessage(message),
+    evidence: [...evidence],
+    sandboxed: Boolean(previous?.sandboxed || hasSandboxResult),
+    sandboxOutcome,
+    proofPassed,
+  }
+}
+
 const client = new TrueForge({
   baseUrl,
   token: process.env.TRUEFORGE_TOKEN || undefined,
@@ -77,7 +152,7 @@ const client = new TrueForge({
 // --- Fix #5: Restrict CORS to same-origin / localhost ---
 const allowedOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map((origin) => origin.trim())
-  : [`http://localhost:5173`, `http://localhost:${port}`, `http://127.0.0.1:${port}`]
+  : ['http://localhost:5173', 'http://127.0.0.1:5173', `http://localhost:${port}`, `http://127.0.0.1:${port}`]
 app.use(
   cors({
     origin(origin, callback) {
@@ -132,39 +207,85 @@ app.post('/api/chat', async (request, response) => {
     // --- Fix #3: Fall back to local demo on TrueForge errors ---
     // --- Fix #2 (rereview): Clear stale pendingResponses so the next
     //     message isn't misrouted as a tool answer to a failed turn ---
-    const sessionState = sessions.get(clientId)
-    if (sessionState) {
-      sessionState.pendingResponses = []
-      touchSession(clientId, sessionState)
-    }
+    const existingState = sessions.get(clientId)
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     console.error(`Chat error for ${clientId}: ${errorMessage}`)
-    response.json({ ...localAgentReply(clientId, message), mode: 'local-demo' })
+    const fallback = localAgentReply(clientId, message)
+    const studio = studioFromReply(fallback.reply, message, existingState?.studio)
+    const sessionState: SessionState = existingState ?? {
+      sessionId: null,
+      pendingResponses: [],
+      lastUsed: Date.now(),
+      studio,
+      localOnly: true,
+    }
+    sessionState.pendingResponses = []
+    sessionState.studio = studio
+    sessionState.localOnly = true
+    touchSession(clientId, sessionState)
+    response.json({ ...fallback, mode: 'local-demo', studio })
   }
 })
 
 async function handleChat(clientId: string, message: string) {
+  let sessionState = sessions.get(clientId)
+  // --- Fix #5 (Qodo PR#6): Always recheck TrueForge availability (cached 15s)
+  //     so a transient outage doesn't permanently trap the client in local-demo ---
   if (!(await trueForgeAvailable())) {
-    return { ...localAgentReply(clientId, message), mode: 'local-demo' as const }
+    const fallback = localAgentReply(clientId, message)
+    const studio = studioFromReply(fallback.reply, message, sessionState?.studio)
+    sessionState = sessionState ?? {
+      sessionId: null,
+      pendingResponses: [],
+      lastUsed: Date.now(),
+      studio,
+      localOnly: true,
+    }
+    sessionState.studio = studio
+    sessionState.localOnly = true
+    touchSession(clientId, sessionState)
+    return { ...fallback, mode: 'local-demo' as const, studio }
   }
 
-  let sessionState = sessions.get(clientId)
-  if (!sessionState) {
+  const isNewSession = !sessionState?.sessionId
+  if (!sessionState?.sessionId) {
     const { data: session } = await client.sessions.create({ agent: { name: agentName } })
-    sessionState = { sessionId: session.id, pendingResponses: [], lastUsed: Date.now() }
+    // --- Fix #5 (Qodo PR#6): Preserve studio metadata from local-demo
+    //     so recovery doesn't erase progress gathered during the outage ---
+    const previousStudio = sessionState?.studio
+    sessionState = {
+      sessionId: session.id,
+      pendingResponses: [],
+      lastUsed: Date.now(),
+      studio: previousStudio ?? {
+        phase: 'orient',
+        topic: topicFromMessage(message),
+        evidence: [],
+        sandboxed: false,
+        sandboxOutcome: 'none',
+        proofPassed: false,
+      },
+      localOnly: false,
+    }
+  } else if (sessionState.localOnly) {
+    // TrueForge recovered — clear the local-only flag so future turns use the agent
+    sessionState.localOnly = false
   }
   touchSession(clientId, sessionState)
 
-  const input: TrueForgeApi.TurnInputItem[] = sessionState.pendingResponses.length
-    ? sessionState.pendingResponses.map((pending) => ({
+  const pendingResponse = sessionState.pendingResponses[0]
+  const input: TrueForgeApi.TurnInputItem[] = pendingResponse
+    ? [{
         type: 'user.tool_response',
-        threadId: pending.threadId,
-        toolCallId: pending.toolCallId,
+        threadId: pendingResponse.threadId,
+        toolCallId: pendingResponse.toolCallId,
         content: message,
-      }))
-    : [{ type: 'user.message', content: message }]
+      }]
+    : [{ type: 'user.message', content: isNewSession ? `${studioResponseInstruction}\n\nLearner message:\n${message}` : message }]
 
-  const stream = await client.sessions.createTurnStream(sessionState.sessionId, { input })
+  const sessionId = sessionState.sessionId
+  if (!sessionId) throw new Error('TrueForge session was not created.')
+  const stream = await client.sessions.createTurnStream(sessionId, { input })
   const events = new Map<string, TrueForgeApi.TurnStreamingEvent>()
   const pendingQuestions: TrueForgeApi.ToolResponseRequiredEvent[] = []
   let reply = ''
@@ -186,6 +307,7 @@ async function handleChat(clientId: string, message: string) {
   const newPending: PendingResponse[] = []
   const suggestions: string[] = []
   const questionText: string[] = []
+  pendingQuestionLoop:
   for (const pending of pendingQuestions) {
     for (const reference of pending.toolCalls) {
       const source = events.get(reference.sourceEventId)
@@ -196,16 +318,20 @@ async function handleChat(clientId: string, message: string) {
       if (args.question) questionText.push(args.question)
       if (args.options) suggestions.push(...args.options)
       newPending.push({ threadId: pending.threadId, toolCallId: reference.id })
+      break pendingQuestionLoop
     }
   }
   sessionState.pendingResponses = newPending
+  const answer = [reply.trim(), ...questionText].filter(Boolean).join('\n\n') || finalOutput
+  const finalAnswer = answer || 'I need one more detail before I can continue. What happened at the moment you got stuck?'
+  sessionState.studio = studioFromReply(finalAnswer, message, sessionState.studio)
   touchSession(clientId, sessionState)
 
-  const answer = [reply.trim(), ...questionText].filter(Boolean).join('\n\n') || finalOutput
   return {
-    reply: answer || 'I need one more detail before I can continue. What happened at the moment you got stuck?',
+    reply: finalAnswer,
     suggestions: [...new Set(suggestions)],
     mode: 'trueforge' as const,
+    studio: sessionState.studio,
   }
 }
 
